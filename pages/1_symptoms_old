@@ -3,7 +3,6 @@ import re
 import os
 import json
 import uuid
-import base64
 import streamlit as st
 from PIL import Image
 from openai import OpenAI
@@ -28,10 +27,7 @@ with col2:
     st.image(image.resize((600, 400)))
 
 st.title("🩺 AI Symptom Checker")
-st.markdown(
-    "Describe your symptoms and/or upload a medical image for AI-powered suggestions "
-    "*(not a diagnosis, for informational purposes only).*"
-)
+st.markdown("Describe your symptoms and/or upload a medical image for AI-powered suggestions (not a diagnosis).")
 
 # -------------------------
 # OpenAI client init
@@ -54,11 +50,7 @@ def _db_url_from_secrets():
         return url
     pg = st.secrets.get("postgres", {})
     if pg:
-        return (
-            f"postgresql://{pg['user']}:{pg['password']}"
-            f"@{pg['host']}:{pg.get('port',5432)}/{pg['dbname']}"
-        )
-    # local default (dev only)
+        return f"postgresql://{pg['user']}:{pg['password']}@{pg['host']}:{pg.get('port',5432)}/{pg['dbname']}"
     return "postgresql://ai_clinic_user:YOUR_PASSWORD@localhost:5432/ai_clinic"
 
 @st.cache_resource
@@ -154,10 +146,7 @@ def save_diagnoses(contact_id, run_id, diagnoses):
     conn = get_db_conn()
     with conn, conn.cursor() as cur:
         for i, d in enumerate(diagnoses, start=1):
-            cur.execute(
-                sql,
-                (contact_id, str(run_id), i, d.get("name", ""), d.get("explanation", ""))
-            )
+            cur.execute(sql, (contact_id, str(run_id), i, d.get("name",""), d.get("explanation","")))
 
 init_db()
 
@@ -206,72 +195,34 @@ EMERGENCY_KEYWORDS = {
 
 def _is_emergency(summary, diagnoses):
     text_blocks = [(summary or "").lower()] + [
-        (d.get("name", "") + " " + d.get("explanation", "")).lower()
-        for d in (diagnoses or [])
+        (d.get("name", "") + " " + d.get("explanation", "")).lower() for d in (diagnoses or [])
     ]
     matched = [k for k in EMERGENCY_KEYWORDS if any(k in t for t in text_blocks)]
     return (bool(matched), matched)
 
-# -------------------------
-# OpenAI call (text + optional image)
-# -------------------------
-def get_conditions_from_gpt(symptoms=None, age=None, sex=None,
-                            duration=None, image_bytes=None, image_mime=None):
+# OpenAI call
+def get_conditions_from_gpt(symptoms=None, age=None, sex=None, duration=None):
     patient_info = ""
-    if symptoms:
-        patient_info += f"Symptoms: {', '.join(symptoms)}. "
-    if age is not None:
-        patient_info += f"Age: {age}. "
-    if sex:
-        patient_info += f"Sex: {sex}. "
-    if duration:
-        patient_info += f"Duration: {duration}. "
-
-    if not patient_info and not image_bytes:
+    if symptoms: patient_info += f"Symptoms: {', '.join(symptoms)}. "
+    if age is not None: patient_info += f"Age: {age}. "
+    if sex: patient_info += f"Sex: {sex}. "
+    if duration: patient_info += f"Duration: {duration}. "
+    if not patient_info:
         patient_info = "No symptoms provided. Please analyze only the uploaded image."
 
-    system_msg = {
-        "role": "system",
-        "content": (
-            "You are a careful medical triage assistant. Return JSON only (no prose) with keys: "
-            "`summary_markdown` (a concise Markdown list of up to 5 likely conditions + short explanations "
-            "+ a brief disclaimer), and `diagnoses` (an array of objects with `name` and `explanation`, max 5). "
-            "Do not provide definitive diagnoses; focus on possible causes and advise seeking proper medical care."
-        )
-    }
-
-    # Build user content: text only or text + image
-    if image_bytes:
-        b64 = base64.b64encode(image_bytes).decode("utf-8")
-        mime = image_mime or "image/jpeg"
-        user_content = [
-            {
-                "type": "text",
-                "text": (
-                    patient_info
-                    + " Analyze both the text description and the attached medical image. "
-                    "Describe major visual findings briefly and integrate them into your reasoning."
-                ),
-            },
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:{mime};base64,{b64}"},
-            },
-        ]
-    else:
-        user_content = patient_info or "Please analyze the provided information."
-
     messages = [
-        system_msg,
-        {"role": "user", "content": user_content},
+        {"role": "system", "content":
+         "You are a careful medical triage assistant. Return JSON only (no prose) with keys: "
+         "`summary_markdown` (a concise Markdown list of up to 5 likely conditions + short explanations + a brief disclaimer), "
+         "and `diagnoses` (an array of objects with `name` and `explanation`, max 5)."},
+        {"role": "user", "content": f"{patient_info} Provide likely conditions."}
     ]
-
     resp = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=messages,
         max_tokens=700,
         temperature=0.3,
-        response_format={"type": "json_object"},
+        response_format={"type": "json_object"}
     )
     try:
         return json.loads(resp.choices[0].message.content)
@@ -292,23 +243,7 @@ email      = st.text_input("Email (optional)", "").strip()
 if email and not _valid_email(email):
     st.warning("Please enter a valid email.")
 
-# Text symptoms
-symptoms_text = st.text_area(
-    "Describe your symptoms",
-    placeholder="e.g., fever, cough, chest pain, rash on right arm"
-)
-
-# Image upload for visible symptoms
-uploaded_image = st.file_uploader(
-    "Optional: Upload a clear photo of the affected area (JPG/PNG)",
-    type=["jpg", "jpeg", "png"]
-)
-if uploaded_image is not None:
-    st.caption("Preview of uploaded image:")
-    img = Image.open(uploaded_image)
-    # adjust width as you like (e.g., 300–400)
-    st.image(img, width=350)
-
+symptoms_text = st.text_area("Describe your symptoms", placeholder="e.g., fever, cough, chest pain")
 age_input    = st.text_input("Age (years)", placeholder="e.g., 22")
 sex_input    = st.selectbox("Sex", ["", "Male", "Female"])
 days_input   = st.text_input("Duration (days)", placeholder="e.g., 3")
@@ -327,26 +262,12 @@ st.session_state["email"]      = email
 # Analyze
 # -------------------------
 if st.button("Analyze"):
-    if not (symptoms_text or age_val or sex_input or dur_val or uploaded_image):
-        st.error("Please enter some symptoms and/or upload a picture.")
+    if not (symptoms_text or age_val or sex_input or dur_val):
+        st.error("Please enter at least one detail.")
         st.stop()
 
-    symptoms_list = [s.strip() for s in (symptoms_text or "").split(",") if s.strip()]
-
-    image_bytes = None
-    image_mime = None
-    if uploaded_image is not None:
-        image_bytes = uploaded_image.getvalue()
-        image_mime = uploaded_image.type or "image/jpeg"
-
-    result = get_conditions_from_gpt(
-        symptoms_list or None,
-        age_val,
-        sex_input or None,
-        duration_input,
-        image_bytes=image_bytes,
-        image_mime=image_mime,
-    )
+    symptoms_list = [s.strip() for s in symptoms_text.split(",") if s.strip()]
+    result = get_conditions_from_gpt(symptoms_list, age_val, sex_input or None, duration_input)
     summary   = result.get("summary_markdown", "")
     diagnoses = result.get("diagnoses", [])[:5]
 
@@ -354,8 +275,7 @@ if st.button("Analyze"):
     is_emergency, matched = _is_emergency(summary, diagnoses)
     if is_emergency:
         msg = "; ".join(matched).title()
-        st.markdown(
-            """
+        st.markdown("""
             <style>
             .er-alert {
                 animation: pulse 1.2s infinite;
@@ -373,75 +293,73 @@ if st.button("Analyze"):
                 100% { box-shadow: 0 0 0 0 rgba(255,0,0,0); }
             }
             </style>
-            """,
-            unsafe_allow_html=True,
-        )
+        """, unsafe_allow_html=True)
         st.markdown(
             f"""
             <div class="er-alert">
-                ⚠️ <strong>POTENTIAL EMERGENCY:</strong> {msg}<br/>
-                If you are experiencing severe symptoms (e.g., crushing chest pain, severe shortness of breath,
-                confusion, fainting), <u>call 911</u> or go to the nearest emergency department immediately.
+                ⚠️ POTENTIAL EMERGENCY: {msg}<br/>
+                If you are experiencing severe symptoms (e.g., crushing chest pain, severe shortness of breath, confusion, fainting),
+                <u>call 911</u> or go to the nearest emergency department immediately.
             </div>
             """,
-            unsafe_allow_html=True,
+            unsafe_allow_html=True
         )
 
     # --- Summary ---
     st.markdown("### AI Summary")
     st.markdown(summary or "_No summary available._")
 
+    # --- Top 5 Diagnoses (optional visible list) ---
+    # st.markdown("### Top 5 Possible Diagnoses")
+    # if diagnoses:
+    #     for i, d in enumerate(diagnoses, start=1):
+    #         name = d.get("name", "").strip() or "(Unknown)"
+    #         expl = d.get("explanation", "").strip()
+    #         st.markdown(f"**{i}. {name}** — {expl}")
+    # else:
+    #     st.write("_No diagnoses returned by the model._")
+
     # --- Suggested Specialists ---
     suggested = suggest_specialties(summary)
-    if suggested:
-        label = ", ".join(suggested[:2]) + ("…" if len(suggested) > 2 else "")
-    else:
-        label = "Family Medicine, Internal Medicine"
     st.markdown("### Suggested Specialist(s)")
-    st.write(label)
+    st.write(", ".join(suggested[:2]) + ("…" if len(suggested) > 2 else ""))
 
     # --- Build a robust symptoms summary string for downstream pages ---
     symptoms_list = [s.strip() for s in (symptoms_text or "").split(",") if s.strip()]
 
     parts = []
     if symptoms_list:
-        parts.append(", ".join(symptoms_list))
+       parts.append(", ".join(symptoms_list))
     if age_val is not None:
-        parts.append(f"Age {age_val}")
+       parts.append(f"Age {age_val}")
     if sex_input:
-        parts.append(sex_input)
+       parts.append(sex_input)
     if dur_val is not None:
-        parts.append(f"{dur_val} days of symptoms")
-    if uploaded_image is not None:
-        parts.append("Image uploaded")
+       parts.append(f"{dur_val} days of symptoms")
 
-    constructed_symptoms = (
-        ", ".join(parts).strip()
-        or "No free-text symptoms provided; AI summary only."
-    )
+    # This line is now safe even if image upload isn't implemented
+    # (no reference to uploaded_image)
+    constructed_symptoms = ", ".join(parts).strip() or "No free-text symptoms provided; AI summary only."
 
     # --- Save to session for other pages ---
-    st.session_state["symptoms_input"]       = constructed_symptoms
-    st.session_state["condition_summary"]    = summary
-    st.session_state["diagnoses"]           = diagnoses
+    st.session_state["symptoms_input"] = constructed_symptoms
+    st.session_state["condition_summary"] = summary
+    st.session_state["diagnoses"] = diagnoses
     st.session_state["suggested_specialties"] = suggested
-    st.session_state["primary_specialty"]   = suggested[0] if suggested else None
+    st.session_state["primary_specialty"] = suggested[0] if suggested else None
 
-    # --- Save Results to DB ---
+    # --- Save Results ---
     try:
-        contact_id = upsert_contact(
-            first_name or "(Unknown)",
-            last_name or "(Unknown)",
-            email or None,
-            zip_norm or None,
-        )
+        contact_id = upsert_contact(first_name or "(Unknown)", last_name or "(Unknown)", email or None, zip_norm or None)
         run_id = uuid.uuid4()
         save_symptoms(contact_id, run_id, age_val, sex_input or None, dur_val, symptoms_text)
         if diagnoses:
             save_diagnoses(contact_id, run_id, diagnoses)
 
+        # Let other pages know which run/contact we just saved
         st.session_state["last_run_id"] = str(run_id)
         st.session_state["contact_id"]  = contact_id
+
         # st.success("Saved to database.")
     except Exception as e:
         st.error(f"Database error: {e}")
@@ -452,4 +370,3 @@ if st.button("Analyze"):
     st.page_link("pages/5_pharmacies_nearby.py", label="Find Nearby Pharmacies", icon="🏪")
 
 st.info("Disclaimer: This tool does not provide medical diagnoses. Always consult a qualified clinician.")
-
