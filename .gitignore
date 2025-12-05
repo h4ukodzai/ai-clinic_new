@@ -1,0 +1,63 @@
+
+# Python
+
+__pycache__/
+
+*.pyc
+
+*.pyo
+
+*.pyd
+
+
+
+# Streamlit secrets & logs (do NOT commit)
+
+.streamlit/secrets.toml
+
+.streamlit/secrets_old
+
+.streamlit/secrets.toml_aws.txt
+
+.streamlit/secrets.toml_pc.txt
+
+.streamlit/*.log
+
+
+
+# SSH keys / PEM files (security!)
+
+id_ed25519
+
+id_ed25519.pub
+
+*.pem
+
+
+
+# OS / editor junk
+
+.DS_Store
+
+*.swp
+
+*.swo
+
+
+
+# Env / virtualenv if ever inside project
+
+venv/
+
+.env
+
+*.env
+
+
+
+# Logs / temp
+
+nohup.out
+
+*.log
+

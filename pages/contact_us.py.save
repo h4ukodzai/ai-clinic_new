@@ -1,0 +1,173 @@
+# contact_us.py
+# Streamlit Contact Us popup with Office 365 SMTP integration
+
+import os
+import ssl
+import smtplib
+import time
+import urllib.parse
+from email.message import EmailMessage
+import streamlit as st
+
+# -----------------------------------------------------------------------------
+# Configuration
+# -----------------------------------------------------------------------------
+CONTACT_TO = os.getenv("CONTACT_TO", "knyakurimwa@health4uai.com")
+
+DEFAULTS = {
+    "SMTP_HOST": "smtp.office365.com",
+    "SMTP_PORT": "587",
+    "SMTP_USE_TLS": "1",
+    "SMTP_USE_SSL": "0",
+}
+
+
+def _load_mail_settings():
+    """Load settings from Streamlit secrets or environment variables."""
+    cfg = dict(DEFAULTS)
+    try:
+        for k in (
+            "SMTP_HOST",
+            "SMTP_PORT",
+            "SMTP_USER",
+            "SMTP_PASS",
+            "SMTP_USE_TLS",
+            "SMTP_USE_SSL",
+            "app_name",
+        ):
+            if k in st.secrets:
+                cfg[k] = str(st.secrets[k])
+    except Exception:
+        pass
+
+    for k in (
+        "SMTP_HOST",
+        "SMTP_PORT",
+        "SMTP_USER",
+        "SMTP_PASS",
+        "SMTP_USE_TLS",
+        "SMTP_USE_SSL",
+        "app_name",
+    ):
+        v = os.getenv(k)
+        if v is not None:
+            cfg[k] = v
+
+    try:
+        cfg["SMTP_PORT"] = str(int(cfg.get("SMTP_PORT", "587")))
+    except Exception:
+        cfg["SMTP_PORT"] = "587"
+
+    if not cfg.get("app_name"):
+        cfg["app_name"] = "AI Clinic"
+
+    return cfg
+
+
+# -----------------------------------------------------------------------------
+# Email Sending Logic
+# -----------------------------------------------------------------------------
+def send_email_via_smtp(name, user_email, subject, message, cfg=None):
+    """Send email using Office 365 SMTP."""
+    if cfg is None:
+        cfg = _load_mail_settings()
+
+    host = cfg.get("SMTP_HOST")
+    port = int(cfg.get("SMTP_PORT", "587"))
+    user = cfg.get("SMTP_USER")
+    pwd = cfg.get("SMTP_PASS")
+    use_tls = str(cfg.get("SMTP_USE_TLS", "1")).lower() in ("1", "true", "yes")
+    use_ssl = str(cfg.get("SMTP_USE_SSL", "0")).lower() in ("1", "true", "yes")
+
+    if not all([host, port, user, pwd]):
+        return False, "⚠️ SMTP is not configured (missing SMTP_HOST/PORT/USER/PASS)."
+
+    msg = EmailMessage()
+    msg["Subject"] = subject or f"{cfg.get('app_name', 'AI Clinic')} – Contact Form"
+    msg["From"] = f"{cfg.get('app_name', 'AI Clinic')} <{user}>"
+    msg["To"] = CONTACT_TO
+    if user_email:
+        msg["Reply-To"] = user_email
+
+    body = f"""New {cfg.get('app_name','AI Clinic')} contact form submission
+
+From: {name or 'N/A'} <{user_email or 'N/A'}>
+Subject: {subject or 'Contact'}
+
+Message:
+{message}
+"""
+    msg.set_content(body)
+
+    try:
+        if use_ssl:
+            context = ssl.create_default_context()
+            with smtplib.SMTP_SSL(host, port, context=context, timeout=30) as s:
+                s.login(user, pwd)
+                s.send_message(msg)
+        else:
+            with smtplib.SMTP(host, port, timeout=30) as s:
+                if use_tls:
+                    s.starttls(context=ssl.create_default_context())
+                s.login(user, pwd)
+                s.send_message(msg)
+        return True, "✅ Message sent successfully!"
+    except Exception as e:
+        return False, f"❌ Send failed: {e}"
+
+
+# -----------------------------------------------------------------------------
+# Streamlit UI
+# -----------------------------------------------------------------------------
+def _mailto_fallback_link(to_addr, app_name, subject, name, email, message):
+    subj = f"{app_name} – {subject or 'Contact'}"
+    body = f"From: {name or 'N/A'} <{email or 'N/A'}>\n\n{message or ''}"
+    params = {"subject": subj, "body": body}
+    return f"mailto:{to_addr}?" + urllib.parse.urlencode(params)
+
+
+def _rate_limited(key, seconds=15):
+    now = time.time()
+    last = st.session_state.get(key)
+    if last and now - last < seconds:
+        return True
+    st.session_state[key] = now
+    return False
+
+
+def contact_form_ui(button_label="📨 Contact us", help_text="Questions, feedback, or ideas? Send us a note."):
+    cfg = _load_mail_settings()
+
+    if hasattr(st, "popover"):
+        container = st.popover(button_label, use_container_width=True)
+    else:
+        container = st.expander(button_label, expanded=False)
+
+    with container:
+        st.caption(help_text)
+
+        with st.form("contact_form", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            with c1:
+                name = st.text_input("Your name", placeholder="Jane Doe")
+            with c2:
+                email = st.text_input("Your email", placeholder="you@example.com")
+            subject = st.text_input("Subject", placeholder="Feedback / Question / Issue")
+            message = st.text_area("Message", placeholder="Type your message here...", height=140)
+            submitted = st.form_submit_button("Send")
+
+        if submitted:
+            if not message.strip():
+                st.warning("⚠️ Please write a message before sending.")
+                return
+            if _rate_limited("_contact_last_submit", seconds=10):
+                st.info("Please wait a few seconds before sending another message.")
+                return
+
+            ok, info = send_email_via_smtp(name, email, subject, message, cfg=cfg)
+            if ok:
+                st.success(info)
+            else:
+                st.error(info)
+                mailto = _mailto_fallback_link(
+                    CONTACT_TO,

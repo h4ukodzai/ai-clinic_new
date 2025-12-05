@@ -1,0 +1,247 @@
+import os
+import requests
+import streamlit as st
+from PIL import Image
+from streamlit_javascript import st_javascript
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
+# -----------------------------
+# PAGE CONFIG
+# -----------------------------
+st.set_page_config(
+    page_title="AI Clinic | Home",
+    page_icon="assets/h4u_icon2.ico",
+    layout="wide"
+)
+
+# Remove all top white space and Streamlit header bar
+st.markdown("""
+    <style>
+        /* Hide the Streamlit top header */
+        header[data-testid="stHeader"] {
+            display: none;
+        }
+        /* Remove padding around the main block container */
+        .block-container {
+            padding-top: 0rem;
+            margin-top: 0rem;
+        }
+        /* Eliminate gap caused by main view container */
+        div[data-testid="stToolbar"] {
+            display: none;
+        }
+        /* Optional: shrink body top margin for absolute top alignment */
+        body {
+            margin-top: 0;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
+
+# -----------------------------
+# DATABASE SETUP
+# -----------------------------
+def _db_url_from_secrets():
+    """
+    Returns DATABASE_URL from Streamlit secrets or environment.
+    Fallback is a local dev DSN (edit to your local creds if needed).
+    """
+    url = st.secrets.get("DATABASE_URL") or os.environ.get("DATABASE_URL")
+    if url:
+        return url
+    pg = st.secrets.get("postgres", {})
+    if pg:
+        return (
+            f"postgresql://{pg['user']}:{pg['password']}@"
+            f"{pg['host']}:{pg.get('port',5432)}/{pg['dbname']}"
+        )
+    # Fallback for local dev
+    return "postgresql://ai_clinic_user:YOUR_PASSWORD@localhost:5432/ai_clinic"
+
+@st.cache_resource
+def get_db_conn():
+    return psycopg2.connect(_db_url_from_secrets(), cursor_factory=RealDictCursor)
+
+def init_site_hits_table():
+    ddl = """
+    CREATE TABLE IF NOT EXISTS public.site_hits (
+        id BIGSERIAL PRIMARY KEY,
+        page_name TEXT NOT NULL,
+        ip INET,
+        city TEXT,
+        region TEXT,
+        country TEXT,
+        latitude DOUBLE PRECISION,
+        longitude DOUBLE PRECISION,
+        timezone TEXT,
+        user_agent TEXT,
+        visited_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_site_hits_visited_at ON public.site_hits(visited_at);
+    """
+    conn = get_db_conn()
+    with conn, conn.cursor() as cur:
+        cur.execute(ddl)
+    conn.commit()
+
+# Initialize table once at import
+init_site_hits_table()
+
+# -----------------------------
+# VISIT LOGGER
+# -----------------------------
+def record_visit(page_name: str):
+    """
+    Best-effort visit logger. Inserts a row even if JS/IP/geo fail.
+    Shows DB errors on the page to aid debugging.
+    """
+    ip = None
+    ua = None
+    tz = None
+    geo = {}
+
+    # 1) Try to get IP / UA / TZ from the browser (non-fatal if blocked)
+    try:
+        ip = st_javascript("""
+            const ip = await fetch('https://api.ipify.org?format=json')
+              .then(r => r.json()).then(d => d.ip).catch(()=>null);
+            return ip;
+        """)
+    except Exception:
+        pass
+
+    try:
+        ua = st_javascript("return navigator.userAgent || null;")
+    except Exception:
+        pass
+
+    try:
+        tz = st_javascript("return Intl.DateTimeFormat().resolvedOptions().timeZone || null;")
+    except Exception:
+        pass
+
+    # 2) Geo lookup (non-fatal)
+    if ip:
+        try:
+            resp = requests.get(f"https://ipapi.co/{ip}/json/", timeout=6).json()
+            geo = {
+                "city": resp.get("city"),
+                "region": resp.get("region"),
+                "country": resp.get("country_name") or resp.get("country"),
+                "latitude": resp.get("latitude"),
+                "longitude": resp.get("longitude"),
+                "timezone": tz or resp.get("timezone"),
+            }
+        except Exception:
+            pass
+
+    # 3) Persist whatever we have; surface any DB errors on the page
+    try:
+        conn = get_db_conn()
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO public.site_hits
+                    (page_name, ip, city, region, country, latitude, longitude, timezone, user_agent)
+                VALUES (%s, %s::inet, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id;
+                """,
+                (
+                    page_name,
+                    str(ip) if ip else None,  # ensure it's text for inet
+                    geo.get("city"),
+                    geo.get("region"),
+                    geo.get("country"),
+                    geo.get("latitude"),
+                    geo.get("longitude"),
+                    geo.get("timezone") or tz,
+                    ua,
+                ),
+            )
+            new_id = cur.fetchone()["id"]
+        conn.commit()
+        #st.caption(f"visit logged (row id {new_id})")
+    except Exception as e:
+        st.error(f"DB insert failed: {e}")
+
+# -----------------------------
+# LOG THE PAGE VIEW (call once)
+# -----------------------------
+record_visit("Home")
+
+# -----------------------------
+# PAGE UI
+# -----------------------------
+#st.title("Welcome to AI Clinic")
+
+# Logo / Hero Banner
+try:
+    image = Image.open("assets/h4u_logo.png")
+    st.image(image.resize((750, 300)))
+except Exception:
+    st.info("Logo not found at assets/h4u_logo.png (optional).")
+
+# Title + Intro (ASCII only)
+st.markdown(
+    """
+    <div style='text-align:center; font-size: 32px; font-weight: 700; margin-bottom: 10px; line-height: 1;'>
+        Welcome to AI Clinic
+    </div>
+    <div style='text-align:center; color: #3b82f6; font-size: 22px; font-weight: 600; margin-bottom: 10px; line-height: 1.2;'>
+        Your Smart AI Health Assistant
+    </div>
+    <div style='text-align:center; font-size: 16px; line-height: 1.4;'>
+        Analyze your symptoms, get instant health guidance, and find trusted doctors - all powered by advanced AI.
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
+# CTA Button
+st.markdown("<div style='text-align: center;'>", unsafe_allow_html=True)
+cta = st.button("Start Symptoms", key="start_symptoms")
+st.markdown("</div>", unsafe_allow_html=True)
+
+if cta:
+    st.switch_page("pages/1_symptoms.py")
+
+# Feature Grid
+col1, col2, col3, col4, col5, col6 = st.columns(6)
+
+with col1:
+    st.image("assets/symptom.jpg", width=150)
+    st.markdown("##### Instant AI Symptoms Checker")
+    st.write("Enter your symptoms and let our AI suggest possible causes quickly.")
+    st.page_link("pages/1_symptoms.py", label="Try Now")
+
+with col2:
+    st.image("assets/ai_doctor_hero4.jpg", width=175)
+    st.markdown("##### Doctor Finder")
+    st.write("Get matched with recommended doctors in your area for your condition.")
+    st.page_link("pages/2_find_a_doctor.py", label="Find Doctor")
+
+with col3:
+    st.image("assets/otc.png", width=175)
+    st.markdown("##### OTC Medication Tips")
+    st.write("Discover over-the-counter options for symptom relief, plus pharmacy deals.")
+    st.page_link("pages/3_otc_medication.py", label="See Meds")
+
+with col4:
+    st.image("assets/appoint2.jpg", width=175)
+    st.markdown("##### Book an Appointment")
+    st.write("Select a doctor and make an appointment.")
+    st.page_link("pages/4_book_appointment.py", label="Book Now")
+
+with col5:
+    st.image("assets/pharma.jpg", width=150)
+    st.markdown("##### Nearby Pharmacies")
+    st.write("Search for local pharmacies using your ZIP code.")
+    st.page_link("pages/5_pharmacies_nearby.py", label="Find Pharmacies")
+
+with col6:
+    st.image("assets/ai_doctor_hero5.jpg", width=150)
+    st.markdown("##### Nearby Laboratories")
+    st.write("Search for local laboratories using your ZIP code.")
+    st.page_link("pages/6_labs_nearby.py", label="Find Laboratories")
+

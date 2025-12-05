@@ -1,0 +1,281 @@
+# -*- coding: utf-8 -*-
+"""
+Home page for AI Clinic (Streamlit)
+- Branding without Streamlit chrome
+- Robust logo loading
+- Visit logging (IP, UA, TZ, geo)
+- Feature grid with navigation
+"""
+
+import os
+import json
+import requests
+import streamlit as st
+from PIL import Image
+from streamlit_javascript import st_javascript
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
+# -----------------------------
+# PAGE CONFIG (must be first Streamlit call)
+# -----------------------------
+st.set_page_config(
+    page_title="AI Clinic | Home",
+    page_icon="assets/h4u_icon2.ico",
+    layout="wide"
+)
+
+st.markdown(""" 
+<meta property="og:image" content="https://health4uai.com/static/h4u_logo.png" />
+""", unsafe_allow_html=True)
+
+
+# --- Custom Open Graph meta tags + favicon (after set_page_config) ---
+st.markdown(
+    """
+    <meta property="og:title" content="AI Clinic - Health4UAI" />
+    <meta property="og:description" content="Your Smart AI Health Assistant - check symptoms, find doctors, and access health services instantly." />
+    <meta property="og:url" content="https://health4uai.com/" />
+    <meta property="og:image" content="https://health4uai.com/static/h4u_logo.png" />
+    <meta property="og:site_name" content="Health4UAI" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="icon" href="assets/h4u_icon2.ico" />
+    """,
+    unsafe_allow_html=True
+)
+
+# -----------------------------
+# CHROME REMOVAL / STYLES
+# -----------------------------
+st.markdown("""
+<style>
+/* Hide Streamlit header and toolbar */
+header[data-testid="stHeader"]{display:none;}
+div[data-testid="stToolbar"]{display:none;}
+/* Tighten container to remove top gap */
+.block-container{padding-top:0rem;margin-top:0rem;}
+body{margin-top:0;}
+</style>
+""", unsafe_allow_html=True)
+
+# -----------------------------
+# DB CONNECTION
+# -----------------------------
+def _db_url_from_secrets() -> str:
+    url = st.secrets.get("DATABASE_URL") or os.environ.get("DATABASE_URL")
+    if url:
+        return url
+    pg = st.secrets.get("postgres", {})
+    if pg:
+        return (
+            f"postgresql://{pg['user']}:{pg['password']}@"
+            f"{pg['host']}:{pg.get('port', 5432)}/{pg['dbname']}"
+        )
+    # Fallback (edit for local dev)
+    return "postgresql://ai_clinic_user:YOUR_PASSWORD@localhost:5432/ai_clinic"
+
+@st.cache_resource
+def get_db_conn():
+    return psycopg2.connect(_db_url_from_secrets(), cursor_factory=RealDictCursor)
+
+def init_site_hits_table():
+    ddl = """
+    CREATE TABLE IF NOT EXISTS public.site_hits (
+        id BIGSERIAL PRIMARY KEY,
+        page_name TEXT NOT NULL,
+        ip INET,
+        city TEXT,
+        region TEXT,
+        country TEXT,
+        latitude DOUBLE PRECISION,
+        longitude DOUBLE PRECISION,
+        timezone TEXT,
+        user_agent TEXT,
+        visited_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_site_hits_visited_at ON public.site_hits(visited_at);
+    """
+    conn = get_db_conn()
+    with conn, conn.cursor() as cur:
+        cur.execute(ddl)
+    conn.commit()
+
+# Initialize table once at import
+init_site_hits_table()
+
+# -----------------------------
+# VISIT LOGGER
+# -----------------------------
+def _get_browser_ip() -> str | None:
+    js = """
+      (async () => {
+        try {
+          const res = await fetch('https://api.ipify.org?format=json');
+          const d = await res.json();
+          return d?.ip ?? null;
+        } catch (e) { return null; }
+      })();
+    """
+    try:
+        return st_javascript(js)
+    except Exception:
+        return None
+
+def _get_user_agent() -> str | None:
+    js = """
+      (() => {
+        try { return navigator.userAgent ?? null; }
+        catch (e) { return null; }
+      })();
+    """
+    try:
+        return st_javascript(js)
+    except Exception:
+        return None
+
+def _get_timezone() -> str | None:
+    js = """
+      (() => {
+        try { return Intl.DateTimeFormat().resolvedOptions().timeZone ?? null; }
+        catch (e) { return null; }
+      })();
+    """
+    try:
+        return st_javascript(js)
+    except Exception:
+        return None
+
+def record_visit(page_name: str):
+    ip = _get_browser_ip()
+    ua = _get_user_agent()
+    tz = _get_timezone()
+    geo = {}
+    if ip:
+        try:
+            resp = requests.get(f"https://ipapi.co/{ip}/json/", timeout=6).json()
+            geo = {
+                "city": resp.get("city"),
+                "region": resp.get("region"),
+                "country": resp.get("country_name") or resp.get("country"),
+                "latitude": resp.get("latitude"),
+                "longitude": resp.get("longitude"),
+                "timezone": tz or resp.get("timezone"),
+            }
+        except Exception:
+            pass
+    try:
+        conn = get_db_conn()
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO public.site_hits
+                    (page_name, ip, city, region, country, latitude, longitude, timezone, user_agent)
+                VALUES (%s, %s::inet, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id;
+                """,
+                (
+                    page_name,
+                    str(ip) if ip else None,
+                    geo.get("city"),
+                    geo.get("region"),
+                    geo.get("country"),
+                    geo.get("latitude"),
+                    geo.get("longitude"),
+                    geo.get("timezone") or tz,
+                    ua,
+                ),
+            )
+            _ = cur.fetchone()["id"]
+        conn.commit()
+    except Exception as e:
+        st.error(f"DB insert failed: {e}")
+
+# Log this page view
+record_visit("Home")
+
+# -----------------------------
+# UI
+# -----------------------------
+def _resolve_logo_path() -> str | None:
+    candidates = [
+        "assets/h4u_logo.png",
+        "ai-clinic/assets/h4u_logo.png",
+        os.path.join(os.path.dirname(__file__), "assets/h4u_logo.png"),
+        os.path.join(os.path.dirname(__file__), "../assets/h4u_logo.png"),
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return None
+
+# Logo / Hero Banner (version-safe sizing)
+logo_path = _resolve_logo_path()
+if logo_path:
+    try:
+        image = Image.open(logo_path)
+        st.image(image, width=750)  # width works on all versions
+    except Exception as e:
+        st.warning(f"Logo failed to load ({e})")
+else:
+    st.info("Logo not found at assets/h4u_logo.png (optional).")
+
+# Title + Intro (ASCII or HTML entities to avoid encoding issues)
+st.markdown(
+    """
+    <div style='text-align:center; font-size: 32px; font-weight: 700; margin-bottom: 10px; line-height: 1;'>
+        Welcome to AI Clinic
+    </div>
+    <div style='text-align:center; color: #3b82f6; font-size: 22px; font-weight: 600; margin-bottom: 10px; line-height: 1.2;'>
+        Your Smart AI Health Assistant
+    </div>
+    <div style='text-align:center; font-size: 16px; line-height: 1.4;'>
+        Analyze your symptoms, get instant health guidance, and find trusted doctors &mdash; all powered by advanced AI.
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
+# CTA
+st.markdown("<div style='text-align: center;'>", unsafe_allow_html=True)
+if st.button("Start Symptoms", key="start_symptoms"):
+    st.switch_page("pages/1_symptoms.py")
+st.markdown("</div>", unsafe_allow_html=True)
+
+# Feature Grid
+col1, col2, col3, col4, col5, col6 = st.columns(6)
+
+with col1:
+    st.image("assets/symptom.jpg", width=150)
+    st.markdown("##### Instant AI Symptoms Checker")
+    st.write("Enter your symptoms and let our AI suggest possible causes quickly.")
+    st.page_link("pages/1_symptoms.py", label="Try Now")
+
+with col2:
+    st.image("assets/ai_doctor_hero4.jpg", width=175)
+    st.markdown("##### Doctor Finder")
+    st.write("Get matched with recommended doctors in your area for your condition.")
+    st.page_link("pages/2_find_a_doctor.py", label="Find Doctor")
+
+with col3:
+    st.image("assets/otc.png", width=175)
+    st.markdown("##### OTC Medication Tips")
+    st.write("Discover over-the-counter options for symptom relief, plus pharmacy deals.")
+    st.page_link("pages/3_otc_medication.py", label="See Meds")
+
+with col4:
+    st.image("assets/appoint2.jpg", width=175)
+    st.markdown("##### Book an Appointment")
+    st.write("Select a doctor and make an appointment.")
+    st.page_link("pages/4_book_appointment.py", label="Book Now")
+
+with col5:
+    st.image("assets/pharma.jpg", width=150)
+    st.markdown("##### Nearby Pharmacies")
+    st.write("Search for local pharmacies using your ZIP code.")
+    st.page_link("pages/5_pharmacies_nearby.py", label="Find Pharmacies")
+
+with col6:
+    st.image("assets/ai_doctor_hero5.jpg", width=150)
+    st.markdown("##### Nearby Laboratories")
+    st.write("Search for local laboratories using your ZIP code.")
+    st.page_link("pages/6_labs_nearby.py", label="Find Laboratories")
